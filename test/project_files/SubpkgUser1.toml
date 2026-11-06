@@ -1,0 +1,12 @@
+name = "SolverUser"
+uuid = "2a1d7b9e-7c55-4a3b-9b1e-2f0e4b6c1d02"
+version = "0.1.0"
+
+[deps]
+Solvers = "2a1d7b9e-7c55-4a3b-9b1e-2f0e4b6c1d01"
+
+[subdeps]
+Solvers = ["Tsit5", "BDF"]
+
+[compat]
+Solvers = "1"

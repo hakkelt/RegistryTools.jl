@@ -38,7 +38,14 @@ struct Project
     weakdeps::Dict{String, String}
     compat::Dict{String, String}
     extras::Dict{String, String}
+    # `[subpackages]`: name => the raw entry (a list of deps, or a table with `deps` and `autoload`)
+    subpackages::Dict{String, Any}
+    # `[subdeps]`: dependency name => subpackages of it that this package uses
+    subdeps::Dict{String, Any}
 end
+
+Project(name, uuid, version, deps, weakdeps, compat, extras) =
+    Project(name, uuid, version, deps, weakdeps, compat, extras, Dict{String, Any}(), Dict{String, Any}())
 
 Project(project_file::AbstractString) = Project(isfile(project_file) ? TOML.parsefile(project_file) : Dict())
 function Project(d::Dict)
@@ -51,7 +58,17 @@ function Project(d::Dict)
     weakdeps = get(Dict, d, "weakdeps")
     compat = get(Dict, d, "compat")
     extras = get(Dict, d, "extras")
-    Project(name, uuid, version, deps, weakdeps, compat, extras)
+    subpackages = get(Dict{String, Any}, d, "subpackages")
+    subdeps = get(Dict{String, Any}, d, "subdeps")
+    Project(name, uuid, version, deps, weakdeps, compat, extras, subpackages, subdeps)
+end
+
+# The dependencies listed for subpackage `name` (parent deps, weakdeps or sibling subpackages)
+function subpackage_deps(pkg::Project, name::AbstractString)
+    entry = pkg.subpackages[name]
+    entry isa AbstractDict && (entry = get(entry, "deps", String[]))
+    entry isa AbstractString && return String[entry]
+    return String[string(x) for x in entry]
 end
 
 """
