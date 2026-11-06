@@ -17,6 +17,8 @@ const registrator_errors = [:version_zero,
                             :dependency_not_found,
                             :julia_before_07_in_compat,
                             :invalid_compat,
+                            :invalid_subpackages,
+                            :invalid_subdeps,
                             :unexpected_registration_error
                             ]
 
@@ -114,6 +116,10 @@ function set_metadata!(regbr::RegBranch, status::ReturnStatus)
             regbr.metadata[complaint] = "Julia version < 0.7 not allowed in `[compat]`"
         elseif check == :invalid_compat
             regbr.metadata[complaint] = "Following packages are mentioned in `[compat]` but not found in `[deps]` or `[extras]`:\n" * join(data.invalid_compats, "\n")
+        elseif check == :invalid_subpackages
+            regbr.metadata[complaint] = "Error in the `[subpackages]` section of (Julia)Project.toml:\n" * join(data.problems, "\n")
+        elseif check == :invalid_subdeps
+            regbr.metadata[complaint] = "Error in the `[subdeps]` section of (Julia)Project.toml:\n" * join(data.problems, "\n")
         elseif check == :package_url_missing
             regbr.metadata[complaint] = "No repo URL provided for a new package"
         elseif check == :unexpected_registration_error
@@ -518,6 +524,155 @@ function update_compat_file(pkg::Project,
     end
 end
 
+# Subpackages are modules shipped inside a package that are loaded explicitly
+# (`using Parent::Sub`). They share the package's version. The registry records, per
+# version, which subpackages exist and what they depend on (`Subpackages.toml`), and
+# which subpackages of its dependencies a package uses (`Subdeps.toml`):
+#
+#     # Subpackages.toml                  # Subdeps.toml
+#     ["1.2-1"]                           ["0.3-0"]
+#     Common = []                         OrdinaryDiffEq = ["BDF", "Tsit5"]
+#     BDF = ["Common", "NonlinearSolve"]
+#
+# The dependency names refer to `Deps.toml`/`WeakDeps.toml` (or to sibling
+# subpackages). Pkg uses this to install a subpackage's weak dependencies only when
+# something uses that subpackage, and to rule out versions that lack it.
+
+function check_subpackages!(pkg::Project, status::ReturnStatus)
+    problems = String[]
+    malformed = false
+    known = union(keys(pkg.deps), keys(pkg.weakdeps))
+    for (name, entry) in pkg.subpackages
+        if !Base.isidentifier(name)
+            push!(problems, "`$name` is not a valid module name")
+        end
+        if name in known || name == pkg.name
+            push!(problems, "subpackage `$name` has the same name as the package or one of its dependencies")
+        end
+        if entry isa AbstractDict
+            extra = setdiff(keys(entry), ["deps", "autoload"])
+            isempty(extra) || push!(problems, "subpackage `$name` has unknown keys: $(join(sort!(collect(extra)), ", "))")
+            autoload = get(entry, "autoload", false)
+            if autoload isa AbstractVector
+                bad = filter(t -> !(t in known), autoload)
+                isempty(bad) || push!(problems, "`autoload` of subpackage `$name` names packages that are not in `[deps]` or `[weakdeps]`: $(join(bad, ", "))")
+            elseif !(autoload isa Bool)
+                push!(problems, "`autoload` of subpackage `$name` must be `true`, `false` or a list of package names")
+            end
+            deps = get(entry, "deps", String[])
+        else
+            deps = entry
+        end
+        if !(deps isa AbstractString || (deps isa AbstractVector && all(x -> x isa AbstractString, deps)))
+            push!(problems, "subpackage `$name` must list its dependencies as a list of names")
+            malformed = true
+            continue
+        end
+        for dep in subpackage_deps(pkg, name)
+            if dep == name
+                push!(problems, "subpackage `$name` depends on itself")
+            elseif !(dep in known || haskey(pkg.subpackages, dep))
+                push!(problems, "subpackage `$name` depends on `$dep`, which is not in `[deps]`, `[weakdeps]` or `[subpackages]`")
+            end
+        end
+    end
+    !malformed && (cycle = subpackage_cycle(pkg)) !== nothing &&
+        push!(problems, "subpackages depend on each other in a cycle: $(join(cycle, " -> "))")
+    if !isempty(problems)
+        add!(status, :invalid_subpackages, (problems = problems,))
+    end
+    return
+end
+
+function subpackage_cycle(pkg::Project)
+    state = Dict{String, Symbol}()
+    stack = String[]
+    function visit(name)
+        get(state, name, :new) === :done && return nothing
+        if get(state, name, :new) === :active
+            return [stack[findfirst(==(name), stack):end]; name]
+        end
+        state[name] = :active
+        push!(stack, name)
+        for dep in subpackage_deps(pkg, name)
+            haskey(pkg.subpackages, dep) || continue
+            cycle = visit(dep)
+            cycle === nothing || return cycle
+        end
+        pop!(stack)
+        state[name] = :done
+        return nothing
+    end
+    for name in sort!(collect(keys(pkg.subpackages)))
+        cycle = visit(name)
+        cycle === nothing || return cycle
+    end
+    return nothing
+end
+
+# Every subpackage named in `[subdeps]` must exist in some registered version of that
+# dependency. (Which versions have it is left to the resolver, through the dependency's
+# `[compat]` entry.)
+function check_subdeps!(pkg::Project, regdata::Vector{RegistryData},
+                        registry_paths::Vector{<:AbstractString}, status::ReturnStatus)
+    problems = String[]
+    for (dep, subs) in pkg.subdeps
+        if !haskey(pkg.deps, dep)
+            push!(problems, "`$dep` is not in `[deps]`")
+            continue
+        end
+        subs isa AbstractString && (subs = [subs])
+        if !(subs isa AbstractVector && !isempty(subs) && all(x -> x isa AbstractString, subs))
+            push!(problems, "`$dep` must map to a non-empty list of subpackage names")
+            continue
+        end
+        known = registered_subpackages(string(pkg.deps[dep]), regdata, registry_paths)
+        known === nothing && continue # not in these registries; `check_deps!` reports that
+        for sub in subs
+            sub in known || push!(problems, "no registered version of `$dep` has a subpackage `$sub`")
+        end
+    end
+    if !isempty(problems)
+        add!(status, :invalid_subdeps, (problems = problems,))
+    end
+    return
+end
+
+function registered_subpackages(uuid::AbstractString, regdata::Vector{RegistryData},
+                                registry_paths::Vector{<:AbstractString})
+    for (registry_data, registry_path) in zip(regdata, registry_paths)
+        haskey(registry_data.packages, uuid) || continue
+        file = joinpath(registry_path, registry_data.packages[uuid]["path"], "Subpackages.toml")
+        isfile(file) || return Set{String}()
+        names = Set{String}()
+        for data in values(Compress.load(file))
+            union!(names, keys(data))
+        end
+        return names
+    end
+    return nothing
+end
+
+# See the comments for `update_deps_file` for the rationale for the
+# `old_versions` argument.
+function update_subpackages_file(pkg::Project,
+                                 package_path::AbstractString,
+                                 old_versions::Vector{VersionNumber})
+    @debug("update package data: subpackages files")
+    subpackages = Dict{String, Any}(name => sort!(subpackage_deps(pkg, name)) for name in keys(pkg.subpackages))
+    subdeps = Dict{String, Any}(dep => sort!(String[s for s in (subs isa AbstractString ? [subs] : subs)])
+                                for (dep, subs) in pkg.subdeps)
+    for (file, data) in [("Subpackages.toml", subpackages), ("Subdeps.toml", subdeps)]
+        path = joinpath(package_path, file)
+        all_data = isfile(path) ? Compress.load(path, old_versions) : Dict()
+        all_data[pkg.version] = data
+        # Like `WeakDeps.toml`, only written once some version has entries
+        if !isempty(all_data) && !all(isempty, values(all_data))
+            Compress.save(path, all_data)
+        end
+    end
+end
+
 function get_registrator_tree_sha()
     # TODO: Rewrite this to not use as much Pkg internals
     # If Registrator is in the manifest, return its tree-sha.
@@ -574,6 +729,14 @@ function check_and_update_registry_files(pkg::Project, package_repo, tree_hash,
     check_compat!(pkg, regdata, status)
     haserror(status) && return
     update_compat_file(pkg, package_path, old_versions)
+
+    # update package data: subpackages files
+    @debug("check subpackages and subdeps sections")
+    check_subpackages!(pkg, status)
+    haserror(status) && return
+    check_subdeps!(pkg, regdata, [registry_path; registry_deps_paths], status)
+    haserror(status) && return
+    update_subpackages_file(pkg, package_path, old_versions)
 end
 
 """
