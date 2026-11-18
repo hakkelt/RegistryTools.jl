@@ -841,8 +841,9 @@ end
         @test !haserror(register_file("Subpkg2"))
         solvers = joinpath(registry_path, RegistryTools.package_relpath("Solvers"))
         @test TOML.parsefile(joinpath(solvers, "Subpackages.toml")) == Dict(
-            "1" => Dict("Common" => [], "Tsit5" => ["Common", "UUIDs"], "BDF" => ["Common", "Dates"]),
-            "1.1-1" => Dict("Rosenbrock" => ["Common"]),
+            "1" => Dict("Common" => [], "Tsit5" => ["::Common", "UUIDs"], "BDF" => ["::Common", "Dates"]),
+            # `"Solvers::Common"` is recorded in the canonical form
+            "1.1-1" => Dict("Rosenbrock" => ["::Common"]),
         )
         @test !isfile(joinpath(solvers, "Subdeps.toml"))
 
@@ -864,8 +865,11 @@ end
         status = register_file("SubpkgBad1")
         @test haserror(status)
         @test sort(problems(status, :invalid_subpackages)) == sort([
-            "subpackage `UUIDs` has the same name as the package or one of its dependencies",
-            "subpackage `C` depends on `Nowhere`, which is not in `[deps]`, `[weakdeps]` or `[subpackages]`",
+            # (`UUIDs`, named like a dependency, is fine)
+            "subpackage `C` depends on `Nowhere`, which is not in `[deps]` or `[weakdeps]`",
+            "subpackage `E` depends on `A`, which is not in `[deps]` or `[weakdeps]` (write \"::A\" for the subpackage `A`)",
+            "subpackage `E` depends on `UUIDs::X`: a subpackage lists only sibling subpackages, as \"::Sub\"; the subpackages of a dependency go in `[subdeps]`",
+            "subpackage `E` depends on `::Nope`, which is not in `[subpackages]`",
             "subpackage `D` has unknown keys: extra",
             "`autoload` of subpackage `D` must be `true`, `false` or a list of package names",
             "subpackages depend on each other in a cycle: A -> B -> A",

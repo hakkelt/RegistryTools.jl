@@ -10,6 +10,6 @@ Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 
 [subpackages]
 Common = []
-Tsit5 = ["Common", "UUIDs"]
-BDF = { deps = ["Common", "Dates"], autoload = ["Dates"] }
-Rosenbrock = ["Common"]
+Tsit5 = ["::Common", "UUIDs"]
+BDF = { deps = ["::Common", "Dates"], autoload = ["Dates"] }
+Rosenbrock = ["Solvers::Common"]

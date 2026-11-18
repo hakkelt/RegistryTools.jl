@@ -532,10 +532,11 @@ end
 #     # Subpackages.toml                  # Subdeps.toml
 #     ["1.2-1"]                           ["0.3-0"]
 #     Common = []                         OrdinaryDiffEq = ["BDF", "Tsit5"]
-#     BDF = ["Common", "NonlinearSolve"]
+#     BDF = ["::Common", "NonlinearSolve"]
 #
-# The dependency names refer to `Deps.toml`/`WeakDeps.toml` (or to sibling
-# subpackages). Pkg uses this to install a subpackage's weak dependencies only when
+# A plain dependency name refers to `Deps.toml`/`WeakDeps.toml`, and `"::Sub"` to a sibling
+# subpackage (in Project.toml, `"Parent::Sub"` with the package's own name is accepted
+# too, and recorded as `"::Sub"`). A subpackage may share its name with a dependency. Pkg uses this to install a subpackage's weak dependencies only when
 # something uses that subpackage, and to rule out versions that lack it.
 
 function check_subpackages!(pkg::Project, status::ReturnStatus)
@@ -545,9 +546,6 @@ function check_subpackages!(pkg::Project, status::ReturnStatus)
     for (name, entry) in pkg.subpackages
         if !Base.isidentifier(name)
             push!(problems, "`$name` is not a valid module name")
-        end
-        if name in known || name == pkg.name
-            push!(problems, "subpackage `$name` has the same name as the package or one of its dependencies")
         end
         if entry isa AbstractDict
             extra = setdiff(keys(entry), ["deps", "autoload"])
@@ -569,10 +567,18 @@ function check_subpackages!(pkg::Project, status::ReturnStatus)
             continue
         end
         for dep in subpackage_deps(pkg, name)
-            if dep == name
+            ref = subpackage_ref(dep)
+            sibling = subpackage_sibling(pkg, dep)
+            if ref === nothing
+                dep in known && continue
+                hint = haskey(pkg.subpackages, dep) ? " (write \"::$dep\" for the subpackage `$dep`)" : ""
+                push!(problems, "subpackage `$name` depends on `$dep`, which is not in `[deps]` or `[weakdeps]`$hint")
+            elseif sibling === nothing
+                push!(problems, "subpackage `$name` depends on `$dep`: a subpackage lists only sibling subpackages, as \"::Sub\"; the subpackages of a dependency go in `[subdeps]`")
+            elseif sibling == name
                 push!(problems, "subpackage `$name` depends on itself")
-            elseif !(dep in known || haskey(pkg.subpackages, dep))
-                push!(problems, "subpackage `$name` depends on `$dep`, which is not in `[deps]`, `[weakdeps]` or `[subpackages]`")
+            elseif !haskey(pkg.subpackages, sibling)
+                push!(problems, "subpackage `$name` depends on `$dep`, which is not in `[subpackages]`")
             end
         end
     end
@@ -595,7 +601,8 @@ function subpackage_cycle(pkg::Project)
         state[name] = :active
         push!(stack, name)
         for dep in subpackage_deps(pkg, name)
-            haskey(pkg.subpackages, dep) || continue
+            dep = subpackage_sibling(pkg, dep)
+            (dep === nothing || !haskey(pkg.subpackages, dep)) && continue
             cycle = visit(dep)
             cycle === nothing || return cycle
         end
@@ -659,7 +666,9 @@ function update_subpackages_file(pkg::Project,
                                  package_path::AbstractString,
                                  old_versions::Vector{VersionNumber})
     @debug("update package data: subpackages files")
-    subpackages = Dict{String, Any}(name => sort!(subpackage_deps(pkg, name)) for name in keys(pkg.subpackages))
+    # siblings are recorded in the canonical form, `"::Sub"`
+    canonical(dep) = (sib = subpackage_sibling(pkg, dep); sib === nothing ? dep : "::" * sib)
+    subpackages = Dict{String, Any}(name => sort!(map(canonical, subpackage_deps(pkg, name))) for name in keys(pkg.subpackages))
     subdeps = Dict{String, Any}(dep => sort!(String[s for s in (subs isa AbstractString ? [subs] : subs)])
                                 for (dep, subs) in pkg.subdeps)
     for (file, data) in [("Subpackages.toml", subpackages), ("Subdeps.toml", subdeps)]

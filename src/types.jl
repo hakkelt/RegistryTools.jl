@@ -63,7 +63,24 @@ function Project(d::Dict)
     Project(name, uuid, version, deps, weakdeps, compat, extras, subpackages, subdeps)
 end
 
-# The dependencies listed for subpackage `name` (parent deps, weakdeps or sibling subpackages)
+# `"::Sub"` or `"Parent::Sub"` (a subpackage): `(parent, sub)`, `parent` empty for `"::Sub"`;
+# `nothing` for a plain name (a dependency)
+function subpackage_ref(s::AbstractString)
+    i = findfirst("::", s)
+    i === nothing && return nothing
+    return (String(s[1:prevind(s, first(i))]), String(s[nextind(s, last(i)):end]))
+end
+
+# The sibling subpackage that `dep`, in the dependency list of a subpackage of `pkg`, names
+# (`"::Sub"`, or `"Parent::Sub"` with the package's own name), or `nothing`
+function subpackage_sibling(pkg::Project, dep::AbstractString)
+    ref = subpackage_ref(dep)
+    ref === nothing && return nothing
+    return isempty(ref[1]) || ref[1] == pkg.name ? ref[2] : nothing
+end
+
+# The dependencies listed for subpackage `name` (parent deps, weakdeps, and sibling
+# subpackages as `"::Sub"`)
 function subpackage_deps(pkg::Project, name::AbstractString)
     entry = pkg.subpackages[name]
     entry isa AbstractDict && (entry = get(entry, "deps", String[]))
