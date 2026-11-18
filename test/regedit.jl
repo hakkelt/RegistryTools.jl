@@ -861,6 +861,16 @@ end
             "no registered version of `Solvers` has a subpackage `Nope`",
         ]
 
+        # Subpackages among extension triggers
+        status = register_file("SubpkgExt1")
+        @test haserror(status)
+        @test sort(problems(status, :invalid_extension_triggers)) == sort([
+            "extension `BadDepSub` has the trigger `Solvers::Nope`, but no registered version of `Solvers` has a subpackage `Nope`",
+            "extension `BadOwner` has the trigger `Nowhere::X`, but `Nowhere` is not in `[deps]` or `[weakdeps]`",
+            "extension `BadPlain` has the trigger `Own`, which is not in `[deps]` or `[weakdeps]` (write \"::Own\" for the subpackage `Own`)",
+            "extension `BadOwn` has the trigger `::Missing`, which is not in `[subpackages]`",
+        ])
+
         # Malformed [subpackages]
         status = register_file("SubpkgBad1")
         @test haserror(status)

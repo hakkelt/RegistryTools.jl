@@ -19,6 +19,7 @@ const registrator_errors = [:version_zero,
                             :invalid_compat,
                             :invalid_subpackages,
                             :invalid_subdeps,
+                            :invalid_extension_triggers,
                             :unexpected_registration_error
                             ]
 
@@ -120,6 +121,8 @@ function set_metadata!(regbr::RegBranch, status::ReturnStatus)
             regbr.metadata[complaint] = "Error in the `[subpackages]` section of (Julia)Project.toml:\n" * join(data.problems, "\n")
         elseif check == :invalid_subdeps
             regbr.metadata[complaint] = "Error in the `[subdeps]` section of (Julia)Project.toml:\n" * join(data.problems, "\n")
+        elseif check == :invalid_extension_triggers
+            regbr.metadata[complaint] = "Error in the `[extensions]` section of (Julia)Project.toml:\n" * join(data.problems, "\n")
         elseif check == :package_url_missing
             regbr.metadata[complaint] = "No repo URL provided for a new package"
         elseif check == :unexpected_registration_error
@@ -645,6 +648,42 @@ function check_subdeps!(pkg::Project, regdata::Vector{RegistryData},
     return
 end
 
+# Subpackages among the triggers of an extension: `"::Sub"` (or `"Parent::Sub"` with the
+# package's own name) must be in `[subpackages]`, and `"Dep::Sub"` must name a dependency
+# that has the subpackage in some registered version. A plain trigger named like a
+# subpackage, but not a dependency, is the old spelling of `"::Sub"`.
+function check_extension_triggers!(pkg::Project, regdata::Vector{RegistryData},
+                                   registry_paths::Vector{<:AbstractString}, status::ReturnStatus)
+    problems = String[]
+    known = union(keys(pkg.deps), keys(pkg.weakdeps))
+    for (ext, triggers) in pkg.extensions
+        triggers isa AbstractString && (triggers = [triggers])
+        triggers isa AbstractVector || continue
+        for trigger in triggers
+            trigger isa AbstractString || continue
+            ref = subpackage_ref(trigger)
+            if ref === nothing
+                !(trigger in known) && haskey(pkg.subpackages, trigger) &&
+                    push!(problems, "extension `$ext` has the trigger `$trigger`, which is not in `[deps]` or `[weakdeps]` (write \"::$trigger\" for the subpackage `$trigger`)")
+            elseif (sibling = subpackage_sibling(pkg, trigger)) !== nothing
+                haskey(pkg.subpackages, sibling) ||
+                    push!(problems, "extension `$ext` has the trigger `$trigger`, which is not in `[subpackages]`")
+            elseif !(ref[1] in known)
+                push!(problems, "extension `$ext` has the trigger `$trigger`, but `$(ref[1])` is not in `[deps]` or `[weakdeps]`")
+            else
+                uuid = get(pkg.deps, ref[1], get(pkg.weakdeps, ref[1], nothing))
+                subs = registered_subpackages(string(uuid), regdata, registry_paths)
+                subs === nothing || ref[2] in subs ||
+                    push!(problems, "extension `$ext` has the trigger `$trigger`, but no registered version of `$(ref[1])` has a subpackage `$(ref[2])`")
+            end
+        end
+    end
+    if !isempty(problems)
+        add!(status, :invalid_extension_triggers, (problems = problems,))
+    end
+    return
+end
+
 function registered_subpackages(uuid::AbstractString, regdata::Vector{RegistryData},
                                 registry_paths::Vector{<:AbstractString})
     for (registry_data, registry_path) in zip(regdata, registry_paths)
@@ -744,6 +783,8 @@ function check_and_update_registry_files(pkg::Project, package_repo, tree_hash,
     check_subpackages!(pkg, status)
     haserror(status) && return
     check_subdeps!(pkg, regdata, [registry_path; registry_deps_paths], status)
+    haserror(status) && return
+    check_extension_triggers!(pkg, regdata, [registry_path; registry_deps_paths], status)
     haserror(status) && return
     update_subpackages_file(pkg, package_path, old_versions)
 end
