@@ -38,7 +38,16 @@ struct Project
     weakdeps::Dict{String, String}
     compat::Dict{String, String}
     extras::Dict{String, String}
+    # `[subpackages]`: name => the raw entry (a list of deps, or a table with `deps` and `autoload`)
+    subpackages::Dict{String, Any}
+    # `[subdeps]`: dependency name => subpackages of it that this package uses
+    subdeps::Dict{String, Any}
+    # `[extensions]`: name => triggers (checked only for the subpackages among them)
+    extensions::Dict{String, Any}
 end
+
+Project(name, uuid, version, deps, weakdeps, compat, extras) =
+    Project(name, uuid, version, deps, weakdeps, compat, extras, Dict{String, Any}(), Dict{String, Any}(), Dict{String, Any}())
 
 Project(project_file::AbstractString) = Project(isfile(project_file) ? TOML.parsefile(project_file) : Dict())
 function Project(d::Dict)
@@ -51,7 +60,35 @@ function Project(d::Dict)
     weakdeps = get(Dict, d, "weakdeps")
     compat = get(Dict, d, "compat")
     extras = get(Dict, d, "extras")
-    Project(name, uuid, version, deps, weakdeps, compat, extras)
+    subpackages = get(Dict{String, Any}, d, "subpackages")
+    subdeps = get(Dict{String, Any}, d, "subdeps")
+    extensions = get(Dict{String, Any}, d, "extensions")
+    Project(name, uuid, version, deps, weakdeps, compat, extras, subpackages, subdeps, extensions)
+end
+
+# `"::Sub"` or `"Parent::Sub"` (a subpackage): `(parent, sub)`, `parent` empty for `"::Sub"`;
+# `nothing` for a plain name (a dependency)
+function subpackage_ref(s::AbstractString)
+    i = findfirst("::", s)
+    i === nothing && return nothing
+    return (String(s[1:prevind(s, first(i))]), String(s[nextind(s, last(i)):end]))
+end
+
+# The sibling subpackage that `dep`, in the dependency list of a subpackage of `pkg`, names
+# (`"::Sub"`, or `"Parent::Sub"` with the package's own name), or `nothing`
+function subpackage_sibling(pkg::Project, dep::AbstractString)
+    ref = subpackage_ref(dep)
+    ref === nothing && return nothing
+    return isempty(ref[1]) || ref[1] == pkg.name ? ref[2] : nothing
+end
+
+# The dependencies listed for subpackage `name` (parent deps, weakdeps, and sibling
+# subpackages as `"::Sub"`)
+function subpackage_deps(pkg::Project, name::AbstractString)
+    entry = pkg.subpackages[name]
+    entry isa AbstractDict && (entry = get(entry, "deps", String[]))
+    entry isa AbstractString && return String[entry]
+    return String[string(x) for x in entry]
 end
 
 """

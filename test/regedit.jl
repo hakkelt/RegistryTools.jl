@@ -818,6 +818,78 @@ end
     end
 end
 
+@testset "subpackages" begin
+    import RegistryTools: ReturnStatus, check_and_update_registry_files, haserror
+
+    mktempdir(@__DIR__) do temp_dir
+        registry_path = joinpath(temp_dir, "registry")
+        projects_path = joinpath(@__DIR__, "project_files")
+        tree_hash = repeat("0", 40)
+        create_empty_registry(registry_path, "TestRegistry",
+                              "d4e2f5cd-0f48-4704-9988-f1754e755b46")
+        function register_file(name)
+            pkg = Project(joinpath(projects_path, "$name.toml"))
+            status = ReturnStatus(RegistryTools.registrator_errors)
+            check_and_update_registry_files(pkg, "http://example.com/$(pkg.name).git", tree_hash,
+                                            registry_path, String[], status)
+            return status
+        end
+        problems(status, id) = only(c for c in status.triggered_checks if c.id == id).problems
+
+        # Two versions of a package with subpackages; the second adds one
+        @test !haserror(register_file("Subpkg1"))
+        @test !haserror(register_file("Subpkg2"))
+        solvers = joinpath(registry_path, RegistryTools.package_relpath("Solvers"))
+        @test TOML.parsefile(joinpath(solvers, "Subpackages.toml")) == Dict(
+            "1" => Dict("Common" => [], "Tsit5" => ["::Common", "UUIDs"], "BDF" => ["::Common", "Dates"]),
+            # `"Solvers::Common"` is recorded in the canonical form
+            "1.1-1" => Dict("Rosenbrock" => ["::Common"]),
+        )
+        @test !isfile(joinpath(solvers, "Subdeps.toml"))
+
+        # A package that uses some of them
+        @test !haserror(register_file("SubpkgUser1"))
+        user = joinpath(registry_path, RegistryTools.package_relpath("SolverUser"))
+        @test TOML.parsefile(joinpath(user, "Subdeps.toml")) == Dict("0" => Dict("Solvers" => ["BDF", "Tsit5"]))
+        @test !isfile(joinpath(user, "Subpackages.toml"))
+
+        # Subpackages that no version has, and a [subdeps] entry that is not a dependency
+        status = register_file("SubpkgUser2")
+        @test haserror(status)
+        @test sort(problems(status, :invalid_subdeps)) == [
+            "`Missing` is not in `[deps]`",
+            "no registered version of `Solvers` has a subpackage `Nope`",
+        ]
+
+        # Subpackages among extension triggers
+        status = register_file("SubpkgExt1")
+        @test haserror(status)
+        @test sort(problems(status, :invalid_extension_triggers)) == sort([
+            "extension `BadDepSub` has the trigger `Solvers::Nope`, but no registered version of `Solvers` has a subpackage `Nope`",
+            "extension `BadOwner` has the trigger `Nowhere::X`, but `Nowhere` is not in `[deps]` or `[weakdeps]`",
+            "extension `BadPlain` has the trigger `Own`, which is not in `[deps]` or `[weakdeps]` (write \"::Own\" for the subpackage `Own`)",
+            "extension `BadOwn` has the trigger `::Missing`, which is not in `[subpackages]`",
+        ])
+
+        # Malformed [subpackages]
+        status = register_file("SubpkgBad1")
+        @test haserror(status)
+        @test sort(problems(status, :invalid_subpackages)) == sort([
+            # (`UUIDs`, named like a dependency, is fine)
+            "subpackage `C` depends on `Nowhere`, which is not in `[deps]` or `[weakdeps]`",
+            "subpackage `E` depends on `A`, which is not in `[deps]` or `[weakdeps]` (write \"::A\" for the subpackage `A`)",
+            "subpackage `E` depends on `UUIDs::X`: a subpackage lists only sibling subpackages, as \"::Sub\"; the subpackages of a dependency go in `[subdeps]`",
+            "subpackage `E` depends on `::Nope`, which is not in `[subpackages]`",
+            "subpackage `D` has unknown keys: extra",
+            "`autoload` of subpackage `D` must be `true`, `false` or a list of package names",
+            "subpackages depend on each other in a cycle: A -> B -> A",
+        ])
+        regbr = RegistryTools.RegBranch(Project(joinpath(projects_path, "SubpkgBad1.toml")), "branch")
+        RegistryTools.set_metadata!(regbr, status)
+        @test startswith(regbr.metadata["error"], "Error in the `[subpackages]` section of (Julia)Project.toml:\n")
+    end
+end
+
 @testset "The `RegistryTools.package_relpath` function" begin
     @test RegistryTools.package_relpath("Example") == "E/Example"
 
